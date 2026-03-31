@@ -36,8 +36,8 @@ struct Instruction {
     InstructionType type;
 
     // Dependency tracking
-    vector<Instruction*> deps;
-    bool deps_satisfied;
+    vector<Instruction*> dependencies;
+    bool dependencies_satisfied;
 
     // Pipeline state
     Stage stage;
@@ -48,7 +48,7 @@ struct Instruction {
         PC = PC_in;
         type = type_in;
 
-        deps_satisfied = false;
+        dependencies_satisfied = false;
 
         stage = IF;
         cycles_remaining = 1;
@@ -125,10 +125,10 @@ private:
 
     // Instruction Storage
     vector<Instruction*> instruction_window;                    // Stores all (inst_count) instructions for current simulation run
-    unordered_map<uint64_t, Instruction*> last_instruction;     // For dependency tracking
-    
+    unordered_map<uint64_t, Instruction*> latest_occurrence;    // Maps each PC to last dynamic instance of that instruction for dependency tracking
+
     bool fetch_stalled;                             // When IF stage is blocked due to a branch (control hazard)
-    bool CheckDataHazard(Instruction* inst);        // Checks is data dependencies are satisfied
+    bool CheckDataHazard(Instruction* inst);        // Checks if data dependencies are satisfied
     bool CheckStructuralHazard(Instruction* inst);  // Checks if required hardware resource is available
 
     void Fetch();
