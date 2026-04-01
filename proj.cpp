@@ -27,36 +27,45 @@ Simulation::~Simulation() {
 }
 
 void Simulation::LoadInstructions() {
+    //read the file 
     std::ifstream file(trace_file_name);
+    //verify and check if loading failed
     if (!file.is_open()) {
         std::cerr << "Error: Could not open trace file\n";
         return;
     }
-
+    //holds each line in string 
     std::string line;
+    //current line
     uint64_t current_line_num = 0;
+    //number of instructions loaded so far
     uint64_t loaded_count = 0;
+    //every instruction gets a unique dynamic ID as it is loaded, starting from 1
     uint64_t dynamic_id_counter = 1;
 
     std::cout << "Loading instructions from " << trace_file_name << "...\n";
-
+    //Enters an I/O loop, reading the file until the EOF is reached.
     while (std::getline(file, line)) {
         current_line_num++;
-
+        //move to start point by user
         if (current_line_num < start_inst) continue; 
+        //terminate if limit reached
         if (loaded_count >= inst_count) break;
 
+        //comma separated values: PC, type, dependencies
         std::stringstream ss(line);
         std::string token;
-
         std::getline(ss, token, ',');
         uint64_t pc = std::stoull(token, nullptr, 16);
-
         std::getline(ss, token, ',');
+
+        // Convert the instruction type from string to enum
         InstructionType type = static_cast<InstructionType>(std::stoi(token));
 
+        // Create a new instruction object with parsed PC, type, and a unique dynamic ID
         Instruction* inst = new Instruction(pc, type, dynamic_id_counter++);
 
+        //extract the remaining tokens (the static PC dependencies).
         while (std::getline(ss, token, ',')) {
             if (!token.empty() && token.back() == '\r') token.pop_back(); 
             if (!token.empty()) {
@@ -64,73 +73,97 @@ void Simulation::LoadInstructions() {
             }
         }
 
+        // Add the instruction to the window and update the count
         instruction_window.push_back(inst);
         loaded_count++;
     }
 
+    //close the file
     file.close();
     std::cout << "Successfully loaded " << instruction_window.size() << " instructions.\n\n";
 }
 
 int Simulation::GetEXCyclesCount(Instruction* inst) {
+    // If the instruction is a Floating Point operation AND the pipeline (D) is set to 2 or 4, it requires 2 clock cycles.
     if (inst->type == FP && (D == 2 || D == 4)) return 2;
     return 1;
 }
 
 int Simulation::GetMEMCyclesCount(Instruction* inst) {
+    // If the instruction is a LOAD AND the pipeline (D)is set to 3 or 4, retrieving from memory takes 3 clock cycles.
     if (inst->type == LOAD && (D == 3 || D == 4)) return 3;
     return 1;
 }
 
 bool Simulation::CheckDataHazard(Instruction* inst) { 
+    // Loop through every dynamic ID this instruction depends on
     for (uint64_t dep_id : inst->dependencies) {
+        // Scan the downstream pipeline stages (Execute, Memory, WriteBack)
         for (int stage = EX; stage <= WB; stage++) {
+            //active there?
             for (Instruction* active_inst : pipeline.stages[stage]) {
+                // if the active instruction's ID matches the dependency ID, the data is not ready yet. Return true(HAZARD))
                 if (active_inst->dynamic_id == dep_id) return true; 
             }
         }
     }
+
+    // If we scanned the active pipeline and didn't find the dependencies, instructions already finished. Return false (safe!).
     return false; 
 }
 
 bool Simulation::CheckStructuralHazard(Instruction* inst) { 
+    // Checks if the specific unit required by this instruction is already occupied by another instruction in the current clock cycle.
     switch (inst->type) {
+        //INT ALU busy?
         case INT:    return resources.int_inUse;
+        //fpu
         case FP:     return resources.fp_inUse;
+        //branch
         case BRANCH: return resources.branch_inUse;
+        //memory read
         case LOAD:   return resources.mem_read_inUse;
+        //memory write
         case STORE:  return resources.mem_write_inUse;
         default:     return false;
     }
 }
 
 void Simulation::Decode() {
+    // For each instruction in D check for hazards and determine if it can proceed to Execute.
     for (size_t i = 0; i < pipeline.stages[ID].size(); i++) {
+        // pointer to the instruction being evaluated
         Instruction* inst = pipeline.stages[ID][i];
+        // Start by assuming the instruction can move forward this cycle
         inst->is_stalled = false; 
 
         if (!inst->dependencies_satisfied) {
+            //Update dependencies from static PCs to exact dynamic IDs using the hash map 
             vector<uint64_t> translated_dynamic_ids;
             for (uint64_t static_pc : inst->dependencies) {
                 if (latest_occurrence.count(static_pc) > 0) {
+                    // Find the newest dynamic ID assigned to that PC
                     translated_dynamic_ids.push_back(latest_occurrence[static_pc]);
                 }
             }
+            // Overwrite the old PCs with the exact IDs we need to wait for
             inst->dependencies = translated_dynamic_ids;
             inst->dependencies_satisfied = true; 
         }
-
+        //Check if we need to wait for data or if the required execution unit is busy. If either is true, we stall this instruction 
         bool data_hazard = CheckDataHazard(inst);
         bool structural_hazard = CheckStructuralHazard(inst);
-
+        //if any of above true, mark stalled 
         if (data_hazard || structural_hazard) {
             inst->is_stalled = true; 
-            // in-order stall: block the one behind too
+            
+            //if the first instruction stalls, the second one is stall too.
             if (i + 1 < pipeline.stages[ID].size()) {
                 pipeline.stages[ID][i+1]->is_stalled = true;
             }
             break; 
         } else {
+            // If no hazards, mark the required resource as in use for this cycle
             switch (inst->type) {
                 case INT:    resources.int_inUse = true; break;
                 case FP:     resources.fp_inUse = true; break;
@@ -146,10 +179,11 @@ void Simulation::Fetch() {
     int fetched_this_cycle = 0;
 
     while (fetched_this_cycle < 2 && fetch_index < instruction_window.size() && pipeline.stages[IF].size() < 2) {
+        // Get the instruction to fetch
         Instruction* inst = instruction_window[fetch_index];
+        // Place it into the IF stage of the pipeline and update the hash map with its dynamic ID 
         pipeline.stages[IF].push_back(inst);
         latest_occurrence[inst->PC] = inst->dynamic_id; // map update
-        
         fetch_index++;
         fetched_this_cycle++;
     }
