@@ -3,14 +3,12 @@
 
 #include <iostream>
 #include <vector>
-#include <queue>
 #include <unordered_map>
 #include <cstdint>
 #include <string>
 
 using namespace std;
 
-// Instruction Types
 enum InstructionType {
     INT = 1,
     FP = 2,
@@ -19,8 +17,6 @@ enum InstructionType {
     STORE = 5
 };
 
-
-// Pipeline Stages
 enum Stage {
     IF = 0,
     ID = 1,
@@ -29,34 +25,39 @@ enum Stage {
     WB = 4
 };
 
-
 // Instruction Structure
 struct Instruction {
     uint64_t PC;
     InstructionType type;
+    
+    // sequence number to track instances
+    uint64_t dynamic_id; 
 
-    // Dependency tracking
-    vector<Instruction*> dependencies;
+    // dynamic IDs instead of memory pointers
+    vector<uint64_t> dependencies; 
     bool dependencies_satisfied;
 
     // Pipeline state
     Stage stage;
     int cycles_remaining;   // for multi-cycle stages (when D > 1)
     bool completed;
+    
+    // Hazard tracking
+    bool is_stalled; 
 
-    Instruction(uint64_t PC_in, InstructionType type_in) {
+    Instruction(uint64_t PC_in, InstructionType type_in, uint64_t id_in) {
         PC = PC_in;
         type = type_in;
+        dynamic_id = id_in; 
 
         dependencies_satisfied = false;
-
         stage = IF;
         cycles_remaining = 1;
         completed = false;
+        is_stalled = false; 
     }
 };
 
-// Pipeline (2-wide superscalar)
 class Pipeline {
 public:
     Pipeline() {
@@ -65,8 +66,7 @@ public:
         }
     }
 
-    // stages[0] = IF, stages[1] = ID, stages[2] = EX, stages[3] = MEM, stages[4] = WB
-    // Each stage holds up to 2 instructions
+    // max 2 per stage for superscalar
     vector<Instruction*> stages[5]; 
 
     void Clear() {
@@ -75,8 +75,6 @@ public:
     }
 };
 
-
-// Resource Tracking (per cycle)
 struct Resources {
     bool int_inUse;
     bool fp_inUse;
@@ -93,43 +91,42 @@ struct Resources {
     }
 };
 
-// Simulation Class
 class Simulation {
 public:
-    Simulation(string trace_file_name, uint64_t start_inst,
-               uint64_t inst_count, int depth_config);
-
+    Simulation(string trace_file_name, uint64_t start_inst, uint64_t inst_count, int depth_config);
     ~Simulation();
 
+    void LoadInstructions(); 
     void RunSimulation();
+    void PrintStats(); 
 
 private:
-    // Input Parameters
     string trace_file_name;
     uint64_t start_inst;
     uint64_t inst_count;
     int D;
 
-    // Statistics
     uint64_t int_count;
     uint64_t fp_count;
     uint64_t branch_count;
     uint64_t load_count;
     uint64_t store_count;
 
-    // State
-    Pipeline pipeline;              // 5 stages, 2 instructions per stage
-    Resources resources;            // Hardware resource usage tracking for current cycle
-    uint64_t cycle;                 // Current cycle number
-    uint64_t retired_instructions;  // Total instructions finished so far
+    Pipeline pipeline;              
+    Resources resources;            
+    uint64_t cycle;                 
+    uint64_t retired_instructions;  
 
-    // Instruction Storage
-    vector<Instruction*> instruction_window;                    // Stores all (inst_count) instructions for current simulation run
-    unordered_map<uint64_t, Instruction*> latest_occurrence;    // Maps each PC to last dynamic instance of that instruction for dependency tracking
+    vector<Instruction*> instruction_window;                    
+    
+    // Hash map 
+    unordered_map<uint64_t, uint64_t> latest_occurrence;    
 
-    bool fetch_stalled;                             // When IF stage is blocked due to a branch (control hazard)
-    bool CheckDataHazard(Instruction* inst);        // Checks if data dependencies are satisfied
-    bool CheckStructuralHazard(Instruction* inst);  // Checks if required hardware resource is available
+    uint64_t fetch_index; 
+    bool fetch_stalled;                             
+    
+    bool CheckDataHazard(Instruction* inst);        
+    bool CheckStructuralHazard(Instruction* inst);  
 
     void Fetch();
     void Decode();      
@@ -137,15 +134,10 @@ private:
     void Memory();
     void WriteBack();
 
-    void AdvancePipeline(); // Move instructions to next stage if possible
+    void AdvancePipeline(); 
 
-    void LoadInstructions(); // Load instructions from trace file into instruction_window
-
-    int GetEXCyclesCount(Instruction* inst);     // Get number of cycles needed in EX stage (depends on instruction type and D)
-    int GetMEMCyclesCount(Instruction* inst);    // Get number of cycles needed in MEM stage (depends on instruction type and D)
-
-    void UpdateStats(Instruction* inst); // NOT CERTAIN ABOUT THIS ONE, MAYBE UPDATE IN OTHER PLACES
-    // WE NEED A FUNCTION TO PRINT STATS
+    int GetEXCyclesCount(Instruction* inst);     
+    int GetMEMCyclesCount(Instruction* inst);    
 };
 
 #endif
