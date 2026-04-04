@@ -208,12 +208,47 @@ void Simulation::RunSimulation() {
 }
 
 int main(int argc, char* argv[]) {
+
+    // Check number of arguments
     if (argc != 5) {
-        std::cout << "Usage: ./sim <trace_file> <start_inst> <inst_count> <depth_config>\n";
+        printf("Usage: ./sim <trace_file> <start_inst> <inst_count> <depth_config>\n");
         return 1;
     }
 
-    Simulation sim(argv[1], std::stoull(argv[2]), std::stoull(argv[3]), std::stoi(argv[4]));
+    // Input arguments
+    string trace_file_name = argv[1];
+    uint64_t start_inst = std::stoull(argv[2]);
+    uint64_t inst_count = std::stoull(argv[3]);
+    int D = std::stoi(argv[4]);
+
+    // Error checking
+    if (start_inst < 0 || inst_count <= 0) {
+        printf("Input Error: start_inst and inst_count must be positive.\n");
+        printf("Terminating Simulation...\n");
+        return 1;
+    }
+
+    if (D < 1 || D > 4) {
+        printf("Input Error: depth_config (D) must be between 1 and 4.\n");
+        printf("Terminating Simulation...\n");
+        return 1;
+    }
+
+    std::ifstream file(trace_file_name);
+    if (!file.is_open()) {
+        printf("Input Error: Trace file could not be opened.\n");
+        printf("Terminating Simulation...\n");
+        return 1;
+    }
+    file.close();
+
+    // Run simulation
+    printf("Running simulation with:\n");
+    printf("Trace file = %s, start_inst = %llu, inst_count = %llu, D = %d\n",
+           trace_file_name.c_str(), start_inst, inst_count, D);
+
+    Simulation sim(trace_file_name, start_inst, inst_count, D);
+
     sim.LoadInstructions();
     sim.RunSimulation();
     sim.PrintStats();
