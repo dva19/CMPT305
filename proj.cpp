@@ -222,19 +222,158 @@ int main(int argc, char* argv[]) {
 }
 
 void Simulation::WriteBack() {
-   
+    for (size_t i = 0; i < pipeline.stages[WB].size(); i++) {
+    // pointer to the instruction being evaluated
+    Instruction* inst = pipeline.stages[WB][i];
+
+    // update statistics
+    switch (inst->type) {
+        case INT:    int_count++;       break;
+        case FP:     fp_count++;        break;
+        case BRANCH: branch_count++;    break;
+        case LOAD:   load_count++;      break;
+        case STORE:  store_count++;     break;
+    }
+    retired_instructions++;
+
+    // not sure if completed should be set true now or during Memory/Execute 
+    inst->completed = true;         
+    }
 }
 
 void Simulation::Memory() {
-    
+    // empty memory queue
+    if (pipeline.stages[MEM].size() == 0)
+        return;
+
+    // assume instruction is not stalled initially
+    Instruction* first = pipeline.stages[MEM][0];
+    first->is_stalled = false;
+    first->cycles_remaining--;
+
+    // First instruction not finished all substages 
+    if (first->cycles_remaining > 0)
+        first->is_stalled = true;
+
+    // 1 instruction in memory queue
+    if (pipeline.stages[MEM].size() == 1){
+        return;
+    } // 2 instructions in memory queue
+    else{           
+        Instruction* second = pipeline.stages[MEM][1];
+        second->is_stalled = false;
+
+        // 2 conditions to stop second instruction:
+        // 1. First instruciton is stalled
+        // 2. Both instructions are Load/Store functions
+        if (first->is_stalled || (first->type == second->type && (first->type == LOAD || first->type == STORE))){
+            second->is_stalled = true;
+        } else{
+            second->cycles_remaining--;
+        }
+    }
+    return;
 }
 
 void Simulation::Execute() {
-    
+    // empty EX queue
+    if (pipeline.stages[EX].size() == 0)
+        return;
+
+    // assume instruction is not stalled initially
+    Instruction* first = pipeline.stages[EX][0];
+    first->is_stalled = false;
+    first->cycles_remaining--;
+
+    // First instruction not finished all substages 
+    if (first->cycles_remaining > 0)
+        first->is_stalled = true;
+
+    // 1 instruction in memory queue
+    if (pipeline.stages[EX].size() == 1){
+        return;
+    } // 2 instructions in EX queue
+    else{   
+        switch (first->type) {
+            case INT:    resources.int_inUse = true;        break;
+            case FP:     resources.fp_inUse = true;         break;
+            case BRANCH: resources.branch_inUse = true;     break;
+            case LOAD:   resources.mem_read_inUse = true;   break;
+            case STORE:  resources.mem_write_inUse = true;  break;
+        }
+        Instruction* second = pipeline.stages[MEM][1];
+        second->is_stalled = false;
+        // 2 conditions to stop second instruction:
+        // 1. both instructions are the same instruction type 
+        // (Load and store can't go into MEM effectively means they cannot execute in the same cycle)
+        // 2. first instruction is stalled
+        if (!CheckStructuralHazard(second) || first->is_stalled) {
+            second->is_stalled = true;
+        }   
+        else{
+            second->cycles_remaining--;
+        }
+    }
+    return;
 }
 
 void Simulation::AdvancePipeline() {
+    // move instructions in reverse order
+
+    // WriteBack instructions
+    // statistics updated in WriteBack(), can move here later if needed
+    pipeline.stages[WB].clear();
+
+    // Memory Instructions
+    // move instructions in memory stage to WriteBack - if possible
+    while (pipeline.stages[MEM].size() > 0){
+        Instruction* inst = pipeline.stages[MEM].front();
+        if (!inst->is_stalled){             // instruction is not stalled
+            pipeline.stages[MEM].erase(pipeline.stages[MEM].begin());
+            pipeline.stages[WB].push_back(inst);
+        } else  // if first instruction didn't leave MEM stage, Second instruction cannot 
+            break;  // 
+    }
     
+
+    // move instruction in execute state to MEM - if possible
+    // can only move instructions if MEM stage has empty slots
+    for (size_t i = 0; i < 2 - pipeline.stages[MEM].size(); i++){
+        Instruction* inst = pipeline.stages[EX].front();
+        if (!inst->is_stalled ){
+            inst->cycles_remaining = GetMEMCyclesCount(inst);
+            inst->is_stalled = false;
+            pipeline.stages[EX].erase(pipeline.stages[EX].begin());
+            pipeline.stages[MEM].push_back(inst);
+        }
+        else{       // Two Load/Store instructions cannot enter MEM at same time -  handled in Execute()
+            break;
+        }
+    }
+
+    // move instruction in Decode to Execute - if possible
+    // can only move instructions if Execute has empty slots
+    for (size_t i = 0; i < 2 - pipeline.stages[EX].size(); i++){
+        Instruction* inst = pipeline.stages[ID].front();
+        if (!inst->is_stalled ){
+            inst->cycles_remaining = GetEXCyclesCount(inst);
+            inst->is_stalled = false;
+            pipeline.stages[ID].erase(pipeline.stages[ID].begin());
+            pipeline.stages[EX].push_back(inst);
+        }
+        else{
+            break;
+        }
+    }
+
+    // move instruction in IF to Decode - if possible
+    // can only move instructions if Decode has empty slots 
+    // no stalling in IF
+    for (size_t i = 0; i < 2 - pipeline.stages[ID].size(); i++){
+        Instruction* inst = pipeline.stages[IF].front();
+        pipeline.stages[IF].erase(pipeline.stages[IF].begin());
+        pipeline.stages[ID].push_back(inst);
+    }
 }
 
 void Simulation::PrintStats() {
