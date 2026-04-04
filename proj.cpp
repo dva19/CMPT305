@@ -257,23 +257,8 @@ int main(int argc, char* argv[]) {
 }
 
 void Simulation::WriteBack() {
-    for (size_t i = 0; i < pipeline.stages[WB].size(); i++) {
-    // pointer to the instruction being evaluated
-    Instruction* inst = pipeline.stages[WB][i];
-
-    // update statistics
-    switch (inst->type) {
-        case INT:    int_count++;       break;
-        case FP:     fp_count++;        break;
-        case BRANCH: branch_count++;    break;
-        case LOAD:   load_count++;      break;
-        case STORE:  store_count++;     break;
-    }
-    retired_instructions++;
-
-    // not sure if completed should be set true now or during Memory/Execute 
-    inst->completed = true;         
-    }
+    // statistic update done in Advance pipeline
+    return;
 }
 
 void Simulation::Memory() {
@@ -336,7 +321,7 @@ void Simulation::Execute() {
             case LOAD:   resources.mem_read_inUse = true;   break;
             case STORE:  resources.mem_write_inUse = true;  break;
         }
-        Instruction* second = pipeline.stages[MEM][1];
+        Instruction* second = pipeline.stages[EX][1];
         second->is_stalled = false;
         // 2 conditions to stop second instruction:
         // 1. both instructions are the same instruction type 
@@ -356,7 +341,24 @@ void Simulation::AdvancePipeline() {
     // move instructions in reverse order
 
     // WriteBack instructions
-    // statistics updated in WriteBack(), can move here later if needed
+    for (size_t i = 0; i < pipeline.stages[WB].size(); i++) {
+        // edge case to prevent retired_instruction overflow
+        if (retired_instructions == 1000000)
+            return;
+
+        // pointer to the instruction being evaluated
+        Instruction* inst = pipeline.stages[WB][i];
+
+        // update statistics
+        switch (inst->type) {
+            case INT:    int_count++;       break;
+            case FP:     fp_count++;        break;
+            case BRANCH: branch_count++;    break;
+            case LOAD:   load_count++;      break;
+            case STORE:  store_count++;     break;
+        }
+        retired_instructions++;
+    }
     pipeline.stages[WB].clear();
 
     // Memory Instructions
@@ -366,6 +368,10 @@ void Simulation::AdvancePipeline() {
         if (!inst->is_stalled){             // instruction is not stalled
             pipeline.stages[MEM].erase(pipeline.stages[MEM].begin());
             pipeline.stages[WB].push_back(inst);
+            
+            // update completed for dependencies
+            if (inst->type == LOAD || inst->type == STORE)
+                inst->completed = true;
         } else  // if first instruction didn't leave MEM stage, Second instruction cannot 
             break;  // 
     }
@@ -380,6 +386,10 @@ void Simulation::AdvancePipeline() {
             inst->is_stalled = false;
             pipeline.stages[EX].erase(pipeline.stages[EX].begin());
             pipeline.stages[MEM].push_back(inst);
+
+            // update completed for dependencies
+            if (inst->type == INT || inst->type == FP || inst->type == BRANCH)
+                inst->completed = true;
         }
         else{       // Two Load/Store instructions cannot enter MEM at same time -  handled in Execute()
             break;
