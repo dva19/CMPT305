@@ -95,21 +95,27 @@ int Simulation::GetMEMCyclesCount(Instruction* inst) {
     return 1;
 }
 
-bool Simulation::CheckDataHazard(Instruction* inst) { 
-    // Loop through every dynamic ID this instruction depends on
+bool Simulation::CheckDataHazard(Instruction* inst) {
+    // Loop through every dynamic ID this instruction depends on 
     for (uint64_t dep_id : inst->dependencies) {
         // Scan the downstream pipeline stages (Execute, Memory, WriteBack)
         for (int stage = EX; stage <= WB; stage++) {
-            //active there?
             for (Instruction* active_inst : pipeline.stages[stage]) {
-                // if the active instruction's ID matches the dependency ID, the data is not ready yet. Return true(HAZARD))
-                if (active_inst->dynamic_id == dep_id) return true; 
+                // Stage and type-aware checking
+                if (active_inst->dynamic_id == dep_id) {
+                    // LOAD / STORE finished MEM check
+                    if (active_inst->type == LOAD || active_inst->type == STORE) {
+                        if (stage == EX || stage == MEM) return true;
+                    } 
+                    // INT / FP / BRANCH finished EX check
+                    else {
+                        if (stage == EX) return true;
+                    }
+                }
             }
         }
     }
-
-    // If we scanned the active pipeline and didn't find the dependencies, instructions already finished. Return false (safe!).
-    return false; 
+    return false;
 }
 
 bool Simulation::CheckStructuralHazard(Instruction* inst) { 
@@ -162,15 +168,6 @@ void Simulation::Decode() {
                 pipeline.stages[ID][i+1]->is_stalled = true;
             }
             break; 
-        } else {
-            // If no hazards, mark the required resource as in use for this cycle
-            switch (inst->type) {
-                case INT:    resources.int_inUse = true; break;
-                case FP:     resources.fp_inUse = true; break;
-                case BRANCH: resources.branch_inUse = true; break;
-                case LOAD:   resources.mem_read_inUse = true; break;
-                case STORE:  resources.mem_write_inUse = true; break;
-            }
         }
     }
 }
@@ -212,6 +209,7 @@ int main(int argc, char* argv[]) {
     // Check number of arguments
     if (argc != 5) {
         printf("Usage: ./sim <trace_file> <start_inst> <inst_count> <depth_config>\n");
+        printf("Terminating Simulation...\n");
         return 1;
     }
 
@@ -305,6 +303,22 @@ void Simulation::Execute() {
     first->is_stalled = false;
     first->cycles_remaining--;
 
+    switch (first->type) {
+        case INT:    resources.int_inUse = true; break;
+        case FP:     resources.fp_inUse = true; break;
+        case BRANCH: resources.branch_inUse = true; break;
+        case LOAD:   resources.mem_read_inUse = true; break;
+        case STORE:  resources.mem_write_inUse = true; break;
+    }
+
+    // Branch control hazard
+    if (first->type == BRANCH) {
+        if (first->cycles_remaining > 0)
+            fetch_stalled = true;
+        else
+            fetch_stalled = false;
+    }
+
     // First instruction not finished all substages 
     if (first->cycles_remaining > 0)
         first->is_stalled = true;
@@ -312,29 +326,28 @@ void Simulation::Execute() {
     // 1 instruction in memory queue
     if (pipeline.stages[EX].size() == 1){
         return;
-    } // 2 instructions in EX queue
-    else{   
-        switch (first->type) {
+    } 
+    
+    // 2 instructions in EX queue
+    Instruction* second = pipeline.stages[EX][1];
+    second->is_stalled = false;
+    // 2 conditions to stop second instruction:
+    // 1. both instructions are the same instruction type 
+    // (Load and store can't go into MEM effectively means they cannot execute in the same cycle)
+    // 2. first instruction is stalled
+    if (CheckStructuralHazard(second) || first->is_stalled) {
+        second->is_stalled = true;
+    }   
+    else{
+        second->cycles_remaining--;  
+        switch (second->type) {
             case INT:    resources.int_inUse = true;        break;
             case FP:     resources.fp_inUse = true;         break;
             case BRANCH: resources.branch_inUse = true;     break;
             case LOAD:   resources.mem_read_inUse = true;   break;
             case STORE:  resources.mem_write_inUse = true;  break;
         }
-        Instruction* second = pipeline.stages[EX][1];
-        second->is_stalled = false;
-        // 2 conditions to stop second instruction:
-        // 1. both instructions are the same instruction type 
-        // (Load and store can't go into MEM effectively means they cannot execute in the same cycle)
-        // 2. first instruction is stalled
-        if (!CheckStructuralHazard(second) || first->is_stalled) {
-            second->is_stalled = true;
-        }   
-        else{
-            second->cycles_remaining--;
-        }
     }
-    return;
 }
 
 void Simulation::AdvancePipeline() {
@@ -343,7 +356,7 @@ void Simulation::AdvancePipeline() {
     // WriteBack instructions
     for (size_t i = 0; i < pipeline.stages[WB].size(); i++) {
         // edge case to prevent retired_instruction overflow
-        if (retired_instructions == 1000000)
+        if (retired_instructions == inst_count)
             return;
 
         // pointer to the instruction being evaluated
@@ -380,6 +393,7 @@ void Simulation::AdvancePipeline() {
     // move instruction in execute state to MEM - if possible
     // can only move instructions if MEM stage has empty slots
     for (size_t i = 0; i < 2 - pipeline.stages[MEM].size(); i++){
+        if (pipeline.stages[EX].empty()) break;
         Instruction* inst = pipeline.stages[EX].front();
         if (!inst->is_stalled ){
             inst->cycles_remaining = GetMEMCyclesCount(inst);
@@ -399,6 +413,7 @@ void Simulation::AdvancePipeline() {
     // move instruction in Decode to Execute - if possible
     // can only move instructions if Execute has empty slots
     for (size_t i = 0; i < 2 - pipeline.stages[EX].size(); i++){
+        if (pipeline.stages[ID].empty()) break;
         Instruction* inst = pipeline.stages[ID].front();
         if (!inst->is_stalled ){
             inst->cycles_remaining = GetEXCyclesCount(inst);
@@ -415,6 +430,7 @@ void Simulation::AdvancePipeline() {
     // can only move instructions if Decode has empty slots 
     // no stalling in IF
     for (size_t i = 0; i < 2 - pipeline.stages[ID].size(); i++){
+        if (pipeline.stages[IF].empty()) break;
         Instruction* inst = pipeline.stages[IF].front();
         pipeline.stages[IF].erase(pipeline.stages[IF].begin());
         pipeline.stages[ID].push_back(inst);
