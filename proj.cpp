@@ -283,7 +283,7 @@ void Simulation::Memory() {
     else{
         // MEM can be from size 2 - 4 if there are multiple LOAD instructions in a row
         // LOAD chain ONLY exists before NON-Load instruction
-        for (size_t i = 1; i <= pipeline.stages[MEM].size(); i++){
+        for (size_t i = 1; i < pipeline.stages[MEM].size(); i++){
             Instruction* next = pipeline.stages[MEM][i];
             next->is_stalled = false;
             
@@ -347,7 +347,7 @@ void Simulation::Execute() {
     } 
     // 2 or 3 Instructions in EX
     else{
-        for (size_t i = 1; i <= pipeline.stages[EX].size(); i++){
+        for (size_t i = 1; i < pipeline.stages[EX].size(); i++){
             Instruction* next = pipeline.stages[EX][i];
             next->is_stalled = false;
             
@@ -397,7 +397,7 @@ void Simulation::AdvancePipeline() {
     pipeline.stages[WB].clear();
 
     // Memory Instructions
-    // move (up to 2) instructions in memory stage to WriteBack if not stalled
+    // move up to 2 instructios in memory stage to WriteBack if not stalled
     // at most 2 instruction after Memory() will have is_stalled = true
     while (pipeline.stages[MEM].size() > 0){
         Instruction* inst = pipeline.stages[MEM].front();
@@ -421,17 +421,22 @@ void Simulation::AdvancePipeline() {
     // also allow non-LOAD instruction in if first pipeline is chain of LOAD instructions
     // Will change later if clarifications are different than current assumptions
 
+    bool first_moved = false; // // Added to prevent uninitialized variable bug
     InstructionType first_type;
     for (size_t i = 0; i < 2; i++){
         if (pipeline.stages[EX].empty() || pipeline.stages[MEM].size() == 4) break;
         Instruction* inst = pipeline.stages[EX].front();
-        if (!inst->is_stalled && !((first_type == LOAD || first_type == STORE) && first_type == inst->type)){
+        
+        if (!inst->is_stalled && !(first_moved && (first_type == LOAD || first_type == STORE) && first_type == inst->type)){
             // incoming is a Load instruciton & last instruction in MEM is Load in MEM2
             // or MEM queue of size 0 or 1          
             // or First and Last instructions are Load instructions && incoming instruciton is a non-load Instruction in D3 of D4
-            if (inst->type == LOAD && pipeline.stages[MEM].back()->cycles_remaining == 2 ||
-            pipeline.stages[MEM].size() <= 1 ||  
-            inst->type != LOAD && (D == 3 || D == 4) && (pipeline.stages[MEM].back()->type == LOAD && pipeline.stages[MEM].front()->type == LOAD) ){
+            
+            // // Reordered this if-statement. pipeline.stages[MEM].size() <= 1 MUST be checked 
+            // // before calling .back() or .front() to prevent a Segmentation Fault.
+            if (pipeline.stages[MEM].size() <= 1 ||  
+               (inst->type == LOAD && pipeline.stages[MEM].back()->cycles_remaining == 2) ||
+               (inst->type != LOAD && (D == 3 || D == 4) && (pipeline.stages[MEM].back()->type == LOAD && pipeline.stages[MEM].front()->type == LOAD)) ){
 
                 inst->cycles_remaining = GetMEMCyclesCount(inst);
                 inst->is_stalled = false;
@@ -441,7 +446,9 @@ void Simulation::AdvancePipeline() {
                 // update completed for dependencies
                 if (inst->type == INT || inst->type == FP || inst->type == BRANCH)
                     inst->completed = true;
+                
                 first_type = inst->type;
+                first_moved = true;
             }
         }
         else
@@ -451,14 +458,19 @@ void Simulation::AdvancePipeline() {
     // move instruction in Decode to Execute - if possible
     // can only move instructions if Execute has empty slots
     // ** Need to update it so incoming Floating points can go into EX1
-    for (size_t i = 0; i < 2 - pipeline.stages[EX].size(); i++){
-        if (pipeline.stages[ID].empty()) break;
+    
+    // // Added dynamic capacity so FP instructions don't block the EX stage
+    size_t ex_capacity = (D == 2 || D == 4) ? 4 : 2; 
+    int moved_to_ex = 0;
+
+    while (!pipeline.stages[ID].empty() && moved_to_ex < 2 && pipeline.stages[EX].size() < ex_capacity){
         Instruction* inst = pipeline.stages[ID].front();
         if (!inst->is_stalled ){
             inst->cycles_remaining = GetEXCyclesCount(inst);
             inst->is_stalled = false;
             pipeline.stages[ID].erase(pipeline.stages[ID].begin());
             pipeline.stages[EX].push_back(inst);
+            moved_to_ex++;
         }
         else{
             break;
