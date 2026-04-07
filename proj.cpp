@@ -267,6 +267,7 @@ void Simulation::Memory() {
     // assume instruction is not stalled initially
     Instruction* first = pipeline.stages[MEM][0];
     first->is_stalled = false;
+    // first MEM instruction will never be stalled, no need to check if remaining cycles is 0
     first->cycles_remaining--;
 
     // First instruction not finished all substages 
@@ -276,20 +277,29 @@ void Simulation::Memory() {
     // 1 instruction in memory queue
     if (pipeline.stages[MEM].size() == 1){
         return;
-    } // 2 instructions in memory queue
-    else{           
-        Instruction* second = pipeline.stages[MEM][1];
-        second->is_stalled = false;
+    } // 2 or more instructions in memory queue
+    // EDIT THIS NODE LATER: 2 Load/Stores cannot enter MEM from EX at the same time
+    // SO there is no need to check if first & second instructions are same type
+    else{
+        // MEM can be from size 2 - 4 if there are multiple LOAD instructions in a row
+        // LOAD chain ONLY exists before NON-Load instruction
+        for (size_t i = 1; i <= pipeline.stages[MEM].size(); i++){
+            Instruction* next = pipeline.stages[MEM][i];
+            next->is_stalled = false;
+            
+            // check if cycles remaing is 0 - the case where non LOAD instruciton comes after a LOAD instruction
+            if (next->cycles_remaining > 0)
+                next->cycles_remaining--;
 
-        // 2 conditions to stop second instruction:
-        // 1. First instruciton is stalled
-        // 2. Both instructions are Load/Store functions
-        if (first->is_stalled || (first->type == second->type && (first->type == LOAD || first->type == STORE))){
-            second->is_stalled = true;
-        } else{
-            second->cycles_remaining--;
+            // stall next instruciton if previous instruction is stalled OR cycles remaining is > 0
+            // captures non-Load instruction after LOAD chain (LOAD chain can be just 1 LOAD instruction)
+            // capture LOAD instruciton after non-LOAD instruction 
+            if (pipeline.stages[MEM][i-1]->is_stalled || next->cycles_remaining > 0)
+                next->is_stalled = true;
         }
     }
+    
+
     return;
 }
 
@@ -301,51 +311,63 @@ void Simulation::Execute() {
     // assume instruction is not stalled initially
     Instruction* first = pipeline.stages[EX][0];
     first->is_stalled = false;
-    first->cycles_remaining--;
+    if (first->cycles_remaining > 0){    // incase instruction is done EX but waiting for empty slot in MEM
+        first->cycles_remaining--;
 
-    switch (first->type) {
-        case INT:    resources.int_inUse = true; break;
-        case FP:     resources.fp_inUse = true; break;
-        case BRANCH: resources.branch_inUse = true; break;
-        case LOAD:   resources.mem_read_inUse = true; break;
-        case STORE:  resources.mem_write_inUse = true; break;
+        // Block Consecutive Integer, Branch or Floating Point instruction (Unless Floating points are on differnet Stages)
+        switch (first->type) {
+            case INT:    resources.int_inUse = true; break;
+            // case FP:     resources.fp_inUse = true; break;   // First & Second FP in EX1 handled below
+            case BRANCH: resources.branch_inUse = true; break;
+            // Commented out LOAD and Store, AdvancePipeline function now handles No-Double Load/Store into MEM Entry
+            // can uncomment later if we revert back
+            // case LOAD:   resources.mem_read_inUse = true; break;
+            // case STORE:  resources.mem_write_inUse = true; break;
+        }
     }
-
-    // Branch control hazard
-    if (first->type == BRANCH) {
-        if (first->cycles_remaining > 0)
-            fetch_stalled = true;
-        else
-            fetch_stalled = false;
-    }
+    // Branch control hazard, fetch_stalled always true when Branch instruction is in Execute
+    // Moved Toggle to True in Advance Pipeline function in case Branch Insturction must wait for EX to open up
+    if (first->type == BRANCH)
+        fetch_stalled = true;
 
     // First instruction not finished all substages 
     if (first->cycles_remaining > 0)
         first->is_stalled = true;
-
+    
     // 1 instruction in memory queue
     if (pipeline.stages[EX].size() == 1){
         return;
     } 
     
-    // 2 instructions in EX queue
-    Instruction* second = pipeline.stages[EX][1];
-    second->is_stalled = false;
-    // 2 conditions to stop second instruction:
-    // 1. both instructions are the same instruction type 
-    // (Load and store can't go into MEM effectively means they cannot execute in the same cycle)
-    // 2. first instruction is stalled
-    if (CheckStructuralHazard(second) || first->is_stalled) {
-        second->is_stalled = true;
-    }   
+    // Two Floating points in EX1: F1 already finished EX1, F2 will be the only second instruction with 2 cycles remaining
+    // Also prevents F2 from executing in D1 and D3
+    if (pipeline.stages[EX][1]->cycles_remaining - 1 == first->cycles_remaining){
+        pipeline.stages[EX][1]->is_stalled = true;
+        return;
+    } 
+    // 2 or 3 Instructions in EX
     else{
-        second->cycles_remaining--;  
-        switch (second->type) {
-            case INT:    resources.int_inUse = true;        break;
-            case FP:     resources.fp_inUse = true;         break;
-            case BRANCH: resources.branch_inUse = true;     break;
-            case LOAD:   resources.mem_read_inUse = true;   break;
-            case STORE:  resources.mem_write_inUse = true;  break;
+        for (size_t i = 1; i <= pipeline.stages[EX].size(); i++){
+            Instruction* next = pipeline.stages[EX][i];
+            next->is_stalled = false;
+            
+            // Prevent Execution of Double Int, Double Branch and Double Floating Point EX1
+            if (CheckStructuralHazard(next)){
+                next->is_stalled = true;
+                return;
+            }
+
+            // Always try to decrement next instruction if CheksStructure returns false
+            // Check if cycles remaining is 0 in case next instruciton had to wait
+            if (next->cycles_remaining > 0){
+                next->cycles_remaining--;
+                if (next->type == FP && next->cycles_remaining == 1) // In case F1 in EX2 and F2 & F3 in EX1
+                    resources.fp_inUse = true;
+            }
+
+            // stall next instruciton if previous instruction is stalled OR cycles remaining is > 0
+            if (pipeline.stages[EX][i-1]->is_stalled || next->cycles_remaining > 0)
+                next->is_stalled = true;
         }
     }
 }
@@ -357,7 +379,7 @@ void Simulation::AdvancePipeline() {
     for (size_t i = 0; i < pipeline.stages[WB].size(); i++) {
         // edge case to prevent retired_instruction overflow
         if (retired_instructions == inst_count)
-            return;
+            break;
 
         // pointer to the instruction being evaluated
         Instruction* inst = pipeline.stages[WB][i];
@@ -375,7 +397,8 @@ void Simulation::AdvancePipeline() {
     pipeline.stages[WB].clear();
 
     // Memory Instructions
-    // move instructions in memory stage to WriteBack - if possible
+    // move (up to 2) instructions in memory stage to WriteBack if not stalled
+    // at most 2 instruction after Memory() will have is_stalled = true
     while (pipeline.stages[MEM].size() > 0){
         Instruction* inst = pipeline.stages[MEM].front();
         if (!inst->is_stalled){             // instruction is not stalled
@@ -392,26 +415,42 @@ void Simulation::AdvancePipeline() {
 
     // move instruction in execute state to MEM - if possible
     // can only move instructions if MEM stage has empty slots
-    for (size_t i = 0; i < 2 - pipeline.stages[MEM].size(); i++){
-        if (pipeline.stages[EX].empty()) break;
-        Instruction* inst = pipeline.stages[EX].front();
-        if (!inst->is_stalled ){
-            inst->cycles_remaining = GetMEMCyclesCount(inst);
-            inst->is_stalled = false;
-            pipeline.stages[EX].erase(pipeline.stages[EX].begin());
-            pipeline.stages[MEM].push_back(inst);
+    // moved no Double Load/Store movement functionality here
 
-            // update completed for dependencies
-            if (inst->type == INT || inst->type == FP || inst->type == BRANCH)
-                inst->completed = true;
+    // NOTE** for now LOAD instruction can "pipeline" behind another Load instructions if their trace order is consecutive
+    // also allow non-LOAD instruction in if first pipeline is chain of LOAD instructions
+    // Will change later if clarifications are different than current assumptions
+
+    InstructionType first_type;
+    for (size_t i = 0; i < 2; i++){
+        if (pipeline.stages[EX].empty() || pipeline.stages[MEM].size() == 4) break;
+        Instruction* inst = pipeline.stages[EX].front();
+        if (!inst->is_stalled && !((first_type == LOAD || first_type == STORE) && first_type == inst->type)){
+            // incoming is a Load instruciton & last instruction in MEM is Load in MEM2
+            // or MEM queue of size 0 or 1          
+            // or First and Last instructions are Load instructions && incoming instruciton is a non-load Instruction in D3 of D4
+            if (inst->type == LOAD && pipeline.stages[MEM].back()->cycles_remaining == 2 ||
+            pipeline.stages[MEM].size() <= 1 ||  
+            inst->type != LOAD && (D == 3 || D == 4) && (pipeline.stages[MEM].back()->type == LOAD && pipeline.stages[MEM].front()->type == LOAD) ){
+
+                inst->cycles_remaining = GetMEMCyclesCount(inst);
+                inst->is_stalled = false;
+                pipeline.stages[EX].erase(pipeline.stages[EX].begin());
+                pipeline.stages[MEM].push_back(inst);
+
+                // update completed for dependencies
+                if (inst->type == INT || inst->type == FP || inst->type == BRANCH)
+                    inst->completed = true;
+                first_type = inst->type;
+            }
         }
-        else{       // Two Load/Store instructions cannot enter MEM at same time -  handled in Execute()
+        else
             break;
-        }
     }
 
     // move instruction in Decode to Execute - if possible
     // can only move instructions if Execute has empty slots
+    // ** Need to update it so incoming Floating points can go into EX1
     for (size_t i = 0; i < 2 - pipeline.stages[EX].size(); i++){
         if (pipeline.stages[ID].empty()) break;
         Instruction* inst = pipeline.stages[ID].front();
