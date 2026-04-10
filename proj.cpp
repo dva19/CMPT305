@@ -4,29 +4,10 @@
 #include <iostream>
 #include <iomanip>
 
-Simulation::Simulation(string trace_file_name, uint64_t start_inst, uint64_t inst_count, int depth_config) {
-    this->trace_file_name = trace_file_name;
-    this->start_inst = start_inst;
-    this->inst_count = inst_count;
-    this->D = depth_config;
-    
-    int_count = 0; fp_count = 0; branch_count = 0; load_count = 0; store_count = 0;
-    
-    cycle = 0;
-    fetch_index = 0; 
-    retired_instructions = 0;
-    fetch_stalled = false;
-    
-    resources.Reset();
-}
 
-Simulation::~Simulation() {
-    for (Instruction* inst : instruction_window) {
-        delete inst;
-    }
-}
 
 void Simulation::LoadInstructions() {
+    
     //read the file 
     std::ifstream file(trace_file_name);
     //verify and check if loading failed
@@ -34,6 +15,7 @@ void Simulation::LoadInstructions() {
         std::cerr << "Error: Could not open trace file\n";
         return;
     }
+
     //holds each line in string 
     std::string line;
     //current line
@@ -46,6 +28,7 @@ void Simulation::LoadInstructions() {
     std::cout << "Loading instructions from " << trace_file_name << "...\n";
     //Enters an I/O loop, reading the file until the EOF is reached.
     while (std::getline(file, line)) {
+
         current_line_num++;
         //move to start point by user
         if (current_line_num < start_inst) continue; 
@@ -98,6 +81,7 @@ int Simulation::GetMEMCyclesCount(Instruction* inst) {
 bool Simulation::CheckDataHazard(Instruction* inst) {
     // Loop through every dynamic ID this instruction depends on 
     for (uint64_t dep_id : inst->dependencies) {
+        
         // Scan the downstream pipeline stages (Execute, Memory, WriteBack)
         for (int stage = EX; stage <= WB; stage++) {
             for (Instruction* active_inst : pipeline.stages[stage]) {
@@ -135,43 +119,6 @@ bool Simulation::CheckStructuralHazard(Instruction* inst) {
     }
 }
 
-void Simulation::Decode() {
-    // For each instruction in D check for hazards and determine if it can proceed to Execute.
-    for (size_t i = 0; i < pipeline.stages[ID].size(); i++) {
-        // pointer to the instruction being evaluated
-        Instruction* inst = pipeline.stages[ID][i];
-        // Start by assuming the instruction can move forward this cycle
-        inst->is_stalled = false; 
-
-        if (!inst->dependencies_satisfied) {
-            //Update dependencies from static PCs to exact dynamic IDs using the hash map 
-            vector<uint64_t> translated_dynamic_ids;
-            for (uint64_t static_pc : inst->dependencies) {
-                if (latest_occurrence.count(static_pc) > 0) {
-                    // Find the newest dynamic ID assigned to that PC
-                    translated_dynamic_ids.push_back(latest_occurrence[static_pc]);
-                }
-            }
-            // Overwrite the old PCs with the exact IDs we need to wait for
-            inst->dependencies = translated_dynamic_ids;
-            inst->dependencies_satisfied = true; 
-        }
-        //Check if we need to wait for data or if the required execution unit is busy. If either is true, we stall this instruction 
-        bool data_hazard = CheckDataHazard(inst);
-        bool structural_hazard = CheckStructuralHazard(inst);
-        //if any of above true, mark stalled 
-        if (data_hazard || structural_hazard) {
-            inst->is_stalled = true; 
-            
-            //if the first instruction stalls, the second one is stall too.
-            if (i + 1 < pipeline.stages[ID].size()) {
-                pipeline.stages[ID][i+1]->is_stalled = true;
-            }
-            break; 
-        }
-    }
-}
-
 void Simulation::Fetch() {
     int fetched_this_cycle = 0;
 
@@ -186,121 +133,42 @@ void Simulation::Fetch() {
     }
 }
 
-void Simulation::RunSimulation() {
-    while (retired_instructions < inst_count) {
-        cycle++;
-        resources.Reset(); 
+void Simulation::Decode() {
+    // For each instruction in D check for hazards and determine if it can proceed to Execute.
+    for (size_t i = 0; i < pipeline.stages[ID].size(); i++) {
+        // pointer to the instruction being evaluated
+        Instruction* inst = pipeline.stages[ID][i];
+        // Start by assuming the instruction can move forward this cycle
+        inst->is_stalled = false; 
 
-        WriteBack();
-        Memory();
-        Execute();
-        Decode();
-        
-        if (!fetch_stalled) {
-            Fetch(); 
+        if (!inst->dependencies_translated) {
+            //Update dependencies from static PCs to exact dynamic IDs using the hash map 
+            vector<uint64_t> translated_dynamic_ids;
+            for (uint64_t static_pc : inst->dependencies) {
+                if (latest_occurrence.count(static_pc) > 0) {
+                    // Find the newest dynamic ID assigned to that PC
+                    translated_dynamic_ids.push_back(latest_occurrence[static_pc]);
+                }
+            }
+            // Overwrite the old PCs with the exact IDs we need to wait for
+            inst->dependencies = translated_dynamic_ids;
+            inst->dependencies_translated = true; 
         }
 
-        AdvancePipeline();
-    }
-}
-
-int main(int argc, char* argv[]) {
-
-    // Check number of arguments
-    if (argc != 5) {
-        printf("Usage: ./sim <trace_file> <start_inst> <inst_count> <depth_config>\n");
-        printf("Terminating Simulation...\n");
-        return 1;
-    }
-
-    // Input arguments
-    string trace_file_name = argv[1];
-    uint64_t start_inst = std::stoull(argv[2]);
-    uint64_t inst_count = std::stoull(argv[3]);
-    int D = std::stoi(argv[4]);
-
-    // Error checking
-    if (start_inst < 0 || inst_count <= 0) {
-        printf("Input Error: start_inst and inst_count must be positive.\n");
-        printf("Terminating Simulation...\n");
-        return 1;
-    }
-
-    if (D < 1 || D > 4) {
-        printf("Input Error: depth_config (D) must be between 1 and 4.\n");
-        printf("Terminating Simulation...\n");
-        return 1;
-    }
-
-    std::ifstream file(trace_file_name);
-    if (!file.is_open()) {
-        printf("Input Error: Trace file could not be opened.\n");
-        printf("Terminating Simulation...\n");
-        return 1;
-    }
-    file.close();
-
-    // Run simulation
-    printf("Running simulation with:\n");
-    printf("Trace file = %s, start_inst = %llu, inst_count = %llu, D = %d\n",
-           trace_file_name.c_str(), start_inst, inst_count, D);
-
-    Simulation sim(trace_file_name, start_inst, inst_count, D);
-
-    sim.LoadInstructions();
-    sim.RunSimulation();
-    sim.PrintStats();
-
-    return 0;
-}
-
-void Simulation::WriteBack() {
-    // statistic update done in Advance pipeline
-    return;
-}
-
-void Simulation::Memory() {
-    // empty memory queue
-    if (pipeline.stages[MEM].size() == 0)
-        return;
-
-    // assume instruction is not stalled initially
-    Instruction* first = pipeline.stages[MEM][0];
-    first->is_stalled = false;
-    // first MEM instruction will never be stalled, no need to check if remaining cycles is 0
-    first->cycles_remaining--;
-
-    // First instruction not finished all substages 
-    if (first->cycles_remaining > 0)
-        first->is_stalled = true;
-
-    // 1 instruction in memory queue
-    if (pipeline.stages[MEM].size() == 1){
-        return;
-    } // 2 or more instructions in memory queue
-    // EDIT THIS NODE LATER: 2 Load/Stores cannot enter MEM from EX at the same time
-    // SO there is no need to check if first & second instructions are same type
-    else{
-        // MEM can be from size 2 - 4 if there are multiple LOAD instructions in a row
-        // LOAD chain ONLY exists before NON-Load instruction
-        for (size_t i = 1; i < pipeline.stages[MEM].size(); i++){
-            Instruction* next = pipeline.stages[MEM][i];
-            next->is_stalled = false;
+        //Check if we need to wait for data or if the required execution unit is busy. If either is true, we stall this instruction 
+        bool data_hazard = CheckDataHazard(inst);
+        bool structural_hazard = CheckStructuralHazard(inst);
+        //if any of above true, mark stalled 
+        if (data_hazard || structural_hazard) {
+            inst->is_stalled = true; 
             
-            // check if cycles remaing is 0 - the case where non LOAD instruciton comes after a LOAD instruction
-            if (next->cycles_remaining > 0)
-                next->cycles_remaining--;
-
-            // stall next instruciton if previous instruction is stalled OR cycles remaining is > 0
-            // captures non-Load instruction after LOAD chain (LOAD chain can be just 1 LOAD instruction)
-            // capture LOAD instruciton after non-LOAD instruction 
-            if (pipeline.stages[MEM][i-1]->is_stalled || next->cycles_remaining > 0)
-                next->is_stalled = true;
+            //if the first instruction stalls, the second one is stall too.
+            if (i + 1 < pipeline.stages[ID].size()) {
+                pipeline.stages[ID][i+1]->is_stalled = true;
+            }
+            break; 
         }
     }
-    
-
-    return;
 }
 
 void Simulation::Execute() {
@@ -370,6 +238,55 @@ void Simulation::Execute() {
                 next->is_stalled = true;
         }
     }
+}
+
+void Simulation::Memory() {
+    // empty memory queue
+    if (pipeline.stages[MEM].size() == 0)
+        return;
+
+    // assume instruction is not stalled initially
+    Instruction* first = pipeline.stages[MEM][0];
+    first->is_stalled = false;
+    // first MEM instruction will never be stalled, no need to check if remaining cycles is 0
+    first->cycles_remaining--;
+
+    // First instruction not finished all substages 
+    if (first->cycles_remaining > 0)
+        first->is_stalled = true;
+
+    // 1 instruction in memory queue
+    if (pipeline.stages[MEM].size() == 1){
+        return;
+    } // 2 or more instructions in memory queue
+    // EDIT THIS NODE LATER: 2 Load/Stores cannot enter MEM from EX at the same time
+    // SO there is no need to check if first & second instructions are same type
+    else{
+        // MEM can be from size 2 - 4 if there are multiple LOAD instructions in a row
+        // LOAD chain ONLY exists before NON-Load instruction
+        for (size_t i = 1; i < pipeline.stages[MEM].size(); i++){
+            Instruction* next = pipeline.stages[MEM][i];
+            next->is_stalled = false;
+            
+            // check if cycles remaing is 0 - the case where non LOAD instruciton comes after a LOAD instruction
+            if (next->cycles_remaining > 0)
+                next->cycles_remaining--;
+
+            // stall next instruciton if previous instruction is stalled OR cycles remaining is > 0
+            // captures non-Load instruction after LOAD chain (LOAD chain can be just 1 LOAD instruction)
+            // capture LOAD instruciton after non-LOAD instruction 
+            if (pipeline.stages[MEM][i-1]->is_stalled || next->cycles_remaining > 0)
+                next->is_stalled = true;
+        }
+    }
+    
+
+    return;
+}
+
+void Simulation::WriteBack() {
+    // statistic update done in Advance pipeline
+    return;
 }
 
 void Simulation::AdvancePipeline() {
@@ -488,49 +405,70 @@ void Simulation::AdvancePipeline() {
     }
 }
 
-void Simulation::PrintStats() {
+void Simulation::RunSimulation() {
+    while (retired_instructions < inst_count) {
+        cycle++;
+        resources.Reset(); 
 
-    // Total completed instructions
-    uint64_t total = retired_instructions;
+        WriteBack();
+        Memory();
+        Execute();
+        Decode();
+        
+        if (!fetch_stalled) {
+            Fetch(); 
+        }
 
-    // Division by zero check
-    if (total == 0) {
-        printf("\nSimulation Results:\n");
-        printf("No instructions retired.\n");
-        printf("Total cycles = %llu\n", cycle);
-        return;
+        AdvancePipeline();
+    }
+}
+
+int main(int argc, char* argv[]) {
+
+    // Check number of arguments
+    if (argc != 5) {
+        printf("Usage Error. Correct Usage: ./sim <trace_file> <start_inst> <inst_count> <depth_config>\n");
+        printf("Terminating Simulation...\n");
+        return 1;
     }
 
-    // Instruction %
-    double int_percent    = (double)int_count    * 100.0 / total;
-    double fp_percent    = (double)fp_count     * 100.0 / total;
-    double branch_percent = (double)branch_count * 100.0 / total;
-    double load_percent   = (double)load_count   * 100.0 / total;
-    double store_percent  = (double)store_count  * 100.0 / total;
+    // Input arguments
+    string trace_file_name = argv[1];
+    uint64_t start_inst = std::stoull(argv[2]);
+    uint64_t inst_count = std::stoull(argv[3]);
+    int D = std::stoi(argv[4]);
 
+    // Error checking
+    if (start_inst < 0 || inst_count <= 0) {
+        printf("Input Error: start_inst and inst_count must be positive.\n");
+        printf("Terminating Simulation...\n");
+        return 1;
+    }
 
-    // Frequency based on D
-    double freq;
-    if (D == 1) freq = 1.0;
-    else if (D == 2) freq = 1.2;
-    else if (D == 3) freq = 1.7;
-    else if (D == 4) freq = 1.8;
-    else freq = 1.0; 
+    if (D < 1 || D > 4) {
+        printf("Input Error: depth_config (D) must be between 1 and 4.\n");
+        printf("Terminating Simulation...\n");
+        return 1;
+    }
 
-    // Execution time
-    double exec_time = (double)cycle / (freq * 1e6);
+    std::ifstream file(trace_file_name);
+    if (!file.is_open()) {
+        printf("Input Error: Trace file could not be opened.\n");
+        printf("Terminating Simulation...\n");
+        return 1;
+    }
+    file.close();
 
-    printf("\nSimulation Results:\n");
+    // Run simulation
+    printf("Running simulation with:\n");
+    printf("Trace file = %s, start_inst = %llu, inst_count = %llu, D = %d\n",
+           trace_file_name.c_str(), start_inst, inst_count, D);
 
-    printf("Total cycles = %llu\n", cycle);
-    printf("Total instructions retired = %llu\n", retired_instructions);
+    Simulation sim(trace_file_name, start_inst, inst_count, D);
 
-    printf("Execution time = %.6f ms\n", exec_time);
+    sim.LoadInstructions();
+    sim.RunSimulation();
+    sim.PrintStats();
 
-    printf("\nInstruction mix:\n");
-    printf("INT    = %.2f%%\n", int_percent);
-    printf("FP     = %.2f%%\n", fp_percent);
-    printf("BRANCH = %.2f%%\n", branch_percent);
-    printf("LOAD   = %.2f%%\n", load_percent);
-    printf("STORE  = %.2f%%\n", store_percent);
+    return 0;
 }
