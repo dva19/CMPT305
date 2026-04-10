@@ -35,7 +35,7 @@ struct Instruction {
 
     // dynamic IDs instead of memory pointers
     vector<uint64_t> dependencies; 
-    bool dependencies_satisfied;
+    bool dependencies_translated;
 
     // Pipeline state
     Stage stage;
@@ -50,7 +50,7 @@ struct Instruction {
         type = type_in;
         dynamic_id = id_in; 
 
-        dependencies_satisfied = false;
+        dependencies_translated = false;
         stage = IF;
         cycles_remaining = 1;
         completed = false;
@@ -93,12 +93,76 @@ struct Resources {
 
 class Simulation {
 public:
-    Simulation(string trace_file_name, uint64_t start_inst, uint64_t inst_count, int depth_config);
-    ~Simulation();
+    Simulation(string trace_file_name, uint64_t start_inst, uint64_t inst_count, int depth_config){
+        this->trace_file_name = trace_file_name;
+        this->start_inst = start_inst;
+        this->inst_count = inst_count;
+        this->D = depth_config;
+        
+        int_count = 0; fp_count = 0; branch_count = 0; load_count = 0; store_count = 0;
+        
+        cycle = 0;
+        fetch_index = 0; 
+        retired_instructions = 0;
+        fetch_stalled = false;
+        
+        resources.Reset();
+    };
+
+    ~Simulation(){
+        for (Instruction* inst : instruction_window) {
+            delete inst;
+        }
+    };
 
     void LoadInstructions(); 
     void RunSimulation();
-    void PrintStats(); 
+
+    void PrintStats(){
+        // Total completed instructions
+        uint64_t total = retired_instructions;
+
+        // Division by zero check
+        if (total == 0) {
+            printf("\nSimulation Results:\n");
+            printf("No instructions retired.\n");
+            printf("Total cycles = %llu\n", cycle);
+            return;
+        }
+
+        // Instruction %
+        double int_percent    = (double)int_count    * 100.0 / total;
+        double fp_percent    = (double)fp_count     * 100.0 / total;
+        double branch_percent = (double)branch_count * 100.0 / total;
+        double load_percent   = (double)load_count   * 100.0 / total;
+        double store_percent  = (double)store_count  * 100.0 / total;
+
+
+        // Frequency based on D
+        double freq;
+        if (D == 1) freq = 1.0;
+        else if (D == 2) freq = 1.2;
+        else if (D == 3) freq = 1.7;
+        else if (D == 4) freq = 1.8;
+        else freq = 1.0; 
+
+        // Execution time
+        double exec_time = (double)cycle / (freq * 1e6);
+
+        printf("\nSimulation Results:\n");
+
+        printf("Total cycles = %llu\n", cycle);
+        printf("Total instructions retired = %llu\n", retired_instructions);
+
+        printf("Execution time = %.6f ms\n", exec_time);
+
+        printf("\nInstruction mix:\n");
+        printf("INT    = %.2f%%\n", int_percent);
+        printf("FP     = %.2f%%\n", fp_percent);
+        printf("BRANCH = %.2f%%\n", branch_percent);
+        printf("LOAD   = %.2f%%\n", load_percent);
+        printf("STORE  = %.2f%%\n", store_percent);
+    }; 
 
 private:
     string trace_file_name;
