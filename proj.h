@@ -35,6 +35,7 @@ struct Instruction {
 
     // dynamic IDs instead of memory pointers
     vector<uint64_t> dependencies; 
+    vector <Instruction*> latest_occurence_dependency;
     bool dependencies_translated;
 
     // Pipeline state
@@ -184,7 +185,7 @@ private:
     vector<Instruction*> instruction_window;                    
     
     // Hash map 
-    unordered_map<uint64_t, uint64_t> latest_occurrence;    
+    unordered_map<uint64_t, Instruction*> latest_occurrence;    
 
     uint64_t fetch_index; 
     bool fetch_stalled;                             

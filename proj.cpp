@@ -127,47 +127,40 @@ void Simulation::Fetch() {
         Instruction* inst = instruction_window[fetch_index];
         // Place it into the IF stage of the pipeline and update the hash map with its dynamic ID 
         pipeline.stages[IF].push_back(inst);
-        latest_occurrence[inst->PC] = inst->dynamic_id; // map update
+        for (uint64_t dependency : inst->dependencies){
+            if (latest_occurrence.count(dependency) > 0)
+                inst->latest_occurence_dependency.push_back(latest_occurrence[dependency]);
+        }
+        latest_occurrence[inst->PC] = inst; // map update
         fetch_index++;
         fetched_this_cycle++;
+        // If instruction is a branch instruciton - stall fetch
+        // Set back to false when branch instruction moves out of EX in Advance Pipeline
+        if (inst->type == BRANCH){
+            fetch_stalled = true;
+            break;
+        }
     }
 }
 
 void Simulation::Decode() {
-    // For each instruction in D check for hazards and determine if it can proceed to Execute.
+    if (pipeline.stages[ID].size() == 0) return;
+    // For each instruction in Decode Stage check for hazards and determine if it can proceed to Execute.
     for (size_t i = 0; i < pipeline.stages[ID].size(); i++) {
         // pointer to the instruction being evaluated
         Instruction* inst = pipeline.stages[ID][i];
         // Start by assuming the instruction can move forward this cycle
         inst->is_stalled = false; 
 
-        if (!inst->dependencies_translated) {
-            //Update dependencies from static PCs to exact dynamic IDs using the hash map 
-            vector<uint64_t> translated_dynamic_ids;
-            for (uint64_t static_pc : inst->dependencies) {
-                if (latest_occurrence.count(static_pc) > 0) {
-                    // Find the newest dynamic ID assigned to that PC
-                    translated_dynamic_ids.push_back(latest_occurrence[static_pc]);
-                }
+        for (Instruction* dependecy_inst : inst->latest_occurence_dependency){
+            if (dependecy_inst->completed == false){
+                inst->is_stalled = true;
+                break;
             }
-            // Overwrite the old PCs with the exact IDs we need to wait for
-            inst->dependencies = translated_dynamic_ids;
-            inst->dependencies_translated = true; 
         }
+        if (inst->is_stalled)
+            break;
 
-        //Check if we need to wait for data or if the required execution unit is busy. If either is true, we stall this instruction 
-        bool data_hazard = CheckDataHazard(inst);
-        bool structural_hazard = CheckStructuralHazard(inst);
-        //if any of above true, mark stalled 
-        if (data_hazard || structural_hazard) {
-            inst->is_stalled = true; 
-            
-            //if the first instruction stalls, the second one is stall too.
-            if (i + 1 < pipeline.stages[ID].size()) {
-                pipeline.stages[ID][i+1]->is_stalled = true;
-            }
-            break; 
-        }
     }
 }
 
@@ -181,22 +174,7 @@ void Simulation::Execute() {
     first->is_stalled = false;
     if (first->cycles_remaining > 0){    // incase instruction is done EX but waiting for empty slot in MEM
         first->cycles_remaining--;
-
-        // Block Consecutive Integer, Branch or Floating Point instruction (Unless Floating points are on differnet Stages)
-        switch (first->type) {
-            case INT:    resources.int_inUse = true; break;
-            // case FP:     resources.fp_inUse = true; break;   // First & Second FP in EX1 handled below
-            case BRANCH: resources.branch_inUse = true; break;
-            // Commented out LOAD and Store, AdvancePipeline function now handles No-Double Load/Store into MEM Entry
-            // can uncomment later if we revert back
-            // case LOAD:   resources.mem_read_inUse = true; break;
-            // case STORE:  resources.mem_write_inUse = true; break;
-        }
     }
-    // Branch control hazard, fetch_stalled always true when Branch instruction is in Execute
-    // Moved Toggle to True in Advance Pipeline function in case Branch Insturction must wait for EX to open up
-    if (first->type == BRANCH)
-        fetch_stalled = true;
 
     // First instruction not finished all substages 
     if (first->cycles_remaining > 0)
@@ -205,39 +183,25 @@ void Simulation::Execute() {
     // 1 instruction in memory queue
     if (pipeline.stages[EX].size() == 1){
         return;
-    } 
+    }   // 2 or more Instructions in EX queueue
     
-    // Two Floating points in EX1: F1 already finished EX1, F2 will be the only second instruction with 2 cycles remaining
-    // Also prevents F2 from executing in D1 and D3
-    if (pipeline.stages[EX][1]->cycles_remaining - 1 == first->cycles_remaining){
-        pipeline.stages[EX][1]->is_stalled = true;
-        return;
-    } 
     // 2 or 3 Instructions in EX
     else{
+        // MEM can be from size 2 - 4 if there are multiple LOAD instructions & D4 or D4
         for (size_t i = 1; i < pipeline.stages[EX].size(); i++){
             Instruction* next = pipeline.stages[EX][i];
             next->is_stalled = false;
             
-            // Prevent Execution of Double Int, Double Branch and Double Floating Point EX1
-            if (CheckStructuralHazard(next)){
-                next->is_stalled = true;
-                return;
-            }
-
-            // Always try to decrement next instruction if CheksStructure returns false
-            // Check if cycles remaining is 0 in case next instruciton had to wait
-            if (next->cycles_remaining > 0){
+            // check if cycles remaing is 0 - the case where non LOAD instruciton comes after a LOAD instruction
+            if (next->cycles_remaining > 0)
                 next->cycles_remaining--;
-                if (next->type == FP && next->cycles_remaining == 1) // In case F1 in EX2 and F2 & F3 in EX1
-                    resources.fp_inUse = true;
-            }
 
             // stall next instruciton if previous instruction is stalled OR cycles remaining is > 0
             if (pipeline.stages[EX][i-1]->is_stalled || next->cycles_remaining > 0)
                 next->is_stalled = true;
         }
     }
+    
 }
 
 void Simulation::Memory() {
@@ -259,11 +223,8 @@ void Simulation::Memory() {
     if (pipeline.stages[MEM].size() == 1){
         return;
     } // 2 or more instructions in memory queue
-    // EDIT THIS NODE LATER: 2 Load/Stores cannot enter MEM from EX at the same time
-    // SO there is no need to check if first & second instructions are same type
     else{
-        // MEM can be from size 2 - 4 if there are multiple LOAD instructions in a row
-        // LOAD chain ONLY exists before NON-Load instruction
+        // MEM can be from size 2 - 4 if there are multiple LOAD instructions & D4 or D4
         for (size_t i = 1; i < pipeline.stages[MEM].size(); i++){
             Instruction* next = pipeline.stages[MEM][i];
             next->is_stalled = false;
@@ -273,14 +234,10 @@ void Simulation::Memory() {
                 next->cycles_remaining--;
 
             // stall next instruciton if previous instruction is stalled OR cycles remaining is > 0
-            // captures non-Load instruction after LOAD chain (LOAD chain can be just 1 LOAD instruction)
-            // capture LOAD instruciton after non-LOAD instruction 
             if (pipeline.stages[MEM][i-1]->is_stalled || next->cycles_remaining > 0)
                 next->is_stalled = true;
         }
     }
-    
-
     return;
 }
 
@@ -292,7 +249,7 @@ void Simulation::WriteBack() {
 void Simulation::AdvancePipeline() {
     // move instructions in reverse order
 
-    // WriteBack instructions
+    // WriteBack -> Outside
     for (size_t i = 0; i < pipeline.stages[WB].size(); i++) {
         // edge case to prevent retired_instruction overflow
         if (retired_instructions == inst_count)
@@ -313,10 +270,12 @@ void Simulation::AdvancePipeline() {
     }
     pipeline.stages[WB].clear();
 
-    // Memory Instructions
+    // Memory -> WriteBack
     // move up to 2 instructios in memory stage to WriteBack if not stalled
-    // at most 2 instruction after Memory() will have is_stalled = true
-    while (pipeline.stages[MEM].size() > 0){
+    // at most 2 instruction after Memory() will have is_stalled = false
+    for (size_t i = 0; i < 2; i++){
+        if (pipeline.stages[MEM].size() == 0)
+            break;
         Instruction* inst = pipeline.stages[MEM].front();
         if (!inst->is_stalled){             // instruction is not stalled
             pipeline.stages[MEM].erase(pipeline.stages[MEM].begin());
@@ -330,75 +289,124 @@ void Simulation::AdvancePipeline() {
     }
     
 
-    // move instruction in execute state to MEM - if possible
-    // can only move instructions if MEM stage has empty slots
-    // moved no Double Load/Store movement functionality here
+    // Execute -> Mem
+    // Load instruction can always enter if MEM 1 free -> Second Load will always be rejected so MEM1 is essentially always free
+    // Non-Load instruction can enter if MEM.size is 0 or 1 OR all instructions inside are Load Instructions (see edge case below)
 
-    // NOTE** for now LOAD instruction can "pipeline" behind another Load instructions if their trace order is consecutive
-    // also allow non-LOAD instruction in if first pipeline is chain of LOAD instructions
-    // Will change later if clarifications are different than current assumptions
 
-    bool first_moved = false; // // Added to prevent uninitialized variable bug
-    InstructionType first_type;
     for (size_t i = 0; i < 2; i++){
-        if (pipeline.stages[EX].empty() || pipeline.stages[MEM].size() == 4) break;
+        if (pipeline.stages[EX].empty() || (pipeline.stages[MEM].size() >= 2 && (D == 1 || D == 2)) || pipeline.stages[MEM].size() >= 4) break;
         Instruction* inst = pipeline.stages[EX].front();
         
-        if (!inst->is_stalled && !(first_moved && (first_type == LOAD || first_type == STORE) && first_type == inst->type)){
-            // incoming is a Load instruciton & last instruction in MEM is Load in MEM2
-            // or MEM queue of size 0 or 1          
-            // or First and Last instructions are Load instructions && incoming instruciton is a non-load Instruction in D3 of D4
-            
-            // // Reordered this if-statement. pipeline.stages[MEM].size() <= 1 MUST be checked 
-            // // before calling .back() or .front() to prevent a Segmentation Fault.
-            if (pipeline.stages[MEM].size() <= 1 ||  
-               (inst->type == LOAD && pipeline.stages[MEM].back()->cycles_remaining == 2) ||
-               (inst->type != LOAD && (D == 3 || D == 4) && (pipeline.stages[MEM].back()->type == LOAD && pipeline.stages[MEM].front()->type == LOAD)) ){
+        if (inst->is_stalled )
+            break;
+            // incoming is a Floating Point instruciton & last instruction in EX is Load in EX2
+            // or EX queue of size 0 or 1          
+            // or First and Last instructions are Floati instructions && incoming instruciton is a non-load Instruction in D3 of D4
 
-                inst->cycles_remaining = GetMEMCyclesCount(inst);
-                inst->is_stalled = false;
-                pipeline.stages[EX].erase(pipeline.stages[EX].begin());
-                pipeline.stages[MEM].push_back(inst);
 
-                // update completed for dependencies
-                if (inst->type == INT || inst->type == FP || inst->type == BRANCH)
-                    inst->completed = true;
-                
-                first_type = inst->type;
-                first_moved = true;
+
+        bool LOAD_MEM1_exists = false;
+        bool STORE_exists = false;
+        bool Load_exists = false;
+        int non_LOAD_count = 0;
+        for (size_t j = 0; j < pipeline.stages[MEM].size(); j++){
+            if (pipeline.stages[MEM][j]->type == STORE){
+                STORE_exists = true;
+                non_LOAD_count++;
             }
+            else if (pipeline.stages[MEM][j]->type == LOAD){
+                Load_exists = true;
+                if (pipeline.stages[MEM][j]->cycles_remaining == GetMEMCyclesCount(pipeline.stages[MEM][j]))
+                    LOAD_MEM1_exists = true;
+            }
+            else
+                non_LOAD_count++;
         }
-        else
-            break;
+
+        if (inst->type == STORE && STORE_exists) break;
+        if (inst->type != LOAD){
+            if (Load_exists && non_LOAD_count >= 1) break;
+            if (!Load_exists && non_LOAD_count >= 2) break;
+        }
+        if (inst->type == LOAD && LOAD_MEM1_exists) break;
+
+
+        if (inst->type == INT || inst->type == FP || inst->type == BRANCH) {
+            inst->completed = true;
+        }
+
+        inst->cycles_remaining = GetMEMCyclesCount(inst);
+        inst->is_stalled = false;
+        pipeline.stages[EX].erase(pipeline.stages[EX].begin());
+        pipeline.stages[MEM].push_back(inst);
+
+        if (inst->type == BRANCH)
+            fetch_stalled = false;
     }
 
-    // move instruction in Decode to Execute - if possible
-    // can only move instructions if Execute has empty slots
-    // ** Need to update it so incoming Floating points can go into EX1
-    
-    // // Added dynamic capacity so FP instructions don't block the EX stage
-    size_t ex_capacity = (D == 2 || D == 4) ? 4 : 2; 
-    int moved_to_ex = 0;
 
-    while (!pipeline.stages[ID].empty() && moved_to_ex < 2 && pipeline.stages[EX].size() < ex_capacity){
+
+
+    // Decode -> Execute
+    // Prevents Double Integer/Floating Point/Branch Going into EX at same time
+    // Floating Point can always enter if EX 1 free
+    // Non-Load instruction can enter if EX.size is 0 or 1 OR all instructions are Floating point
+
+    for (size_t i = 0; i < 2; i++){
+        if (pipeline.stages[ID].empty() || (pipeline.stages[EX].size() >= 2 && (D == 1 || D == 3)) || pipeline.stages[EX].size() >= 3) break;
         Instruction* inst = pipeline.stages[ID].front();
-        if (!inst->is_stalled ){
-            inst->cycles_remaining = GetEXCyclesCount(inst);
-            inst->is_stalled = false;
-            pipeline.stages[ID].erase(pipeline.stages[ID].begin());
-            pipeline.stages[EX].push_back(inst);
-            moved_to_ex++;
-        }
-        else{
+        
+        if (inst->is_stalled )
             break;
+            // incoming is a Floating Point instruciton & last instruction in EX is Load in EX2
+            // or EX queue of size 0 or 1          
+            // or First and Last instructions are Floati instructions && incoming instruciton is a non-load Instruction in D3 of D4
+
+
+
+        bool FP_EX1_exists = false;
+        bool FP_exists = false;
+        bool INT_exists = false;
+        bool BRANCH_exists = false;
+        int non_FP_count = 0;
+        for (size_t j = 0; j < pipeline.stages[EX].size(); j++){
+            if (pipeline.stages[EX][j]->type == INT){
+                INT_exists = true;
+                non_FP_count++;
+            }
+            else if (pipeline.stages[EX][j]->type == BRANCH){
+                BRANCH_exists = true;
+                non_FP_count++;
+            }
+            else if (pipeline.stages[EX][j]->type == FP){
+                FP_exists = true;
+                if (pipeline.stages[EX][j]->cycles_remaining == GetEXCyclesCount(pipeline.stages[EX][j]))
+                    FP_EX1_exists = true;
+            }
+            else
+                non_FP_count++;
         }
+
+        if (inst->type == INT && INT_exists) break;
+        if (inst->type == BRANCH && BRANCH_exists) break;
+        if (inst->type == FP && FP_EX1_exists) break;
+        if (inst->type != FP){
+            if (FP_exists && non_FP_count >= 1) break;
+            if (!FP_exists && non_FP_count >= 2) break;
+        }
+
+        inst->cycles_remaining = GetEXCyclesCount(inst);
+        inst->is_stalled = false;
+        pipeline.stages[ID].erase(pipeline.stages[ID].begin());
+        pipeline.stages[EX].push_back(inst);
     }
 
-    // move instruction in IF to Decode - if possible
+    // Fetch -> Decode
     // can only move instructions if Decode has empty slots 
     // no stalling in IF
-    for (size_t i = 0; i < 2 - pipeline.stages[ID].size(); i++){
-        if (pipeline.stages[IF].empty()) break;
+    for (size_t i = 0; i < 2 ; i++){
+        if (pipeline.stages[IF].empty() || pipeline.stages[ID].size() == 2) break;
         Instruction* inst = pipeline.stages[IF].front();
         pipeline.stages[IF].erase(pipeline.stages[IF].begin());
         pipeline.stages[ID].push_back(inst);
