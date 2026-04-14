@@ -63,6 +63,9 @@ void Simulation::LoadInstructions() {
 
     //close the file
     file.close();
+    // safety check - file ends before all instrucions are found
+    if (instruction_window.size() < inst_count)
+        inst_count = instruction_window.size(); 
     std::cout << "Successfully loaded " << instruction_window.size() << " instructions.\n\n";
 }
 
@@ -78,47 +81,6 @@ int Simulation::GetMEMCyclesCount(Instruction* inst) {
     return 1;
 }
 
-bool Simulation::CheckDataHazard(Instruction* inst) {
-    // Loop through every dynamic ID this instruction depends on 
-    for (uint64_t dep_id : inst->dependencies) {
-        
-        // Scan the downstream pipeline stages (Execute, Memory, WriteBack)
-        for (int stage = EX; stage <= WB; stage++) {
-            for (Instruction* active_inst : pipeline.stages[stage]) {
-                // Stage and type-aware checking
-                if (active_inst->dynamic_id == dep_id) {
-                    // LOAD / STORE finished MEM check
-                    if (active_inst->type == LOAD || active_inst->type == STORE) {
-                        if (stage == EX || stage == MEM) return true;
-                    } 
-                    // INT / FP / BRANCH finished EX check
-                    else {
-                        if (stage == EX) return true;
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
-bool Simulation::CheckStructuralHazard(Instruction* inst) { 
-    // Checks if the specific unit required by this instruction is already occupied by another instruction in the current clock cycle.
-    switch (inst->type) {
-        //INT ALU busy?
-        case INT:    return resources.int_inUse;
-        //fpu
-        case FP:     return resources.fp_inUse;
-        //branch
-        case BRANCH: return resources.branch_inUse;
-        //memory read
-        case LOAD:   return resources.mem_read_inUse;
-        //memory write
-        case STORE:  return resources.mem_write_inUse;
-        default:     return false;
-    }
-}
-
 void Simulation::Fetch() {
     int fetched_this_cycle = 0;
 
@@ -127,6 +89,8 @@ void Simulation::Fetch() {
         Instruction* inst = instruction_window[fetch_index];
         // Place it into the IF stage of the pipeline and update the hash map with its dynamic ID 
         pipeline.stages[IF].push_back(inst);
+        // Update the Instructions Pointer Dependency List
+        // Simulations not starting Instruciton 1 will have beginning Instructions add nothing to their dependency list
         for (uint64_t dependency : inst->dependencies){
             if (latest_occurrence.count(dependency) > 0)
                 inst->latest_occurence_dependency.push_back(latest_occurrence[dependency]);
@@ -151,7 +115,7 @@ void Simulation::Decode() {
         Instruction* inst = pipeline.stages[ID][i];
         // Start by assuming the instruction can move forward this cycle
         inst->is_stalled = false; 
-
+        // Any any dependent instruction is not completed, stall the current instruction in ID
         for (Instruction* dependecy_inst : inst->latest_occurence_dependency){
             if (dependecy_inst->completed == false){
                 inst->is_stalled = true;
@@ -172,27 +136,25 @@ void Simulation::Execute() {
     // assume instruction is not stalled initially
     Instruction* first = pipeline.stages[EX][0];
     first->is_stalled = false;
-    if (first->cycles_remaining > 0){    // incase instruction is done EX but waiting for empty slot in MEM
+    if (first->cycles_remaining > 0)    // incase instruction is done EX but waiting for empty slot in MEM
         first->cycles_remaining--;
-    }
 
     // First instruction not finished all substages 
     if (first->cycles_remaining > 0)
         first->is_stalled = true;
     
     // 1 instruction in memory queue
-    if (pipeline.stages[EX].size() == 1){
+    if (pipeline.stages[EX].size() == 1) 
         return;
-    }   // 2 or more Instructions in EX queueue
-    
+
     // 2 or 3 Instructions in EX
     else{
-        // MEM can be from size 2 - 4 if there are multiple LOAD instructions & D4 or D4
+        // EX can be from size 2 - 3 if there are multiple Floating point instructions & D2 or D4
         for (size_t i = 1; i < pipeline.stages[EX].size(); i++){
             Instruction* next = pipeline.stages[EX][i];
             next->is_stalled = false;
             
-            // check if cycles remaing is 0 - the case where non LOAD instruciton comes after a LOAD instruction
+            // check if cycles remaing is 0 - the case where non Floating point instruciton comes after a Floating point instruction
             if (next->cycles_remaining > 0)
                 next->cycles_remaining--;
 
@@ -220,9 +182,9 @@ void Simulation::Memory() {
         first->is_stalled = true;
 
     // 1 instruction in memory queue
-    if (pipeline.stages[MEM].size() == 1){
+    if (pipeline.stages[MEM].size() == 1)
         return;
-    } // 2 or more instructions in memory queue
+     // 2 or more instructions in memory queue
     else{
         // MEM can be from size 2 - 4 if there are multiple LOAD instructions & D4 or D4
         for (size_t i = 1; i < pipeline.stages[MEM].size(); i++){
@@ -285,31 +247,30 @@ void Simulation::AdvancePipeline() {
             if (inst->type == LOAD || inst->type == STORE)
                 inst->completed = true;
         } else  // if first instruction didn't leave MEM stage, Second instruction cannot 
-            break;  // 
+            break;
     }
     
 
     // Execute -> Mem
-    // Load instruction can always enter if MEM 1 free -> Second Load will always be rejected so MEM1 is essentially always free
-    // Non-Load instruction can enter if MEM.size is 0 or 1 OR all instructions inside are Load Instructions (see edge case below)
-
+    // Load instruction can always enter if MEM 1 free -> Repeated Load will always be rejected so MEM1 is essentially always free
+    // Non-Load instruction can enter if MEM size is 0 or 1 OR all instructions inside are Load Instructions (see edge case below)
 
     for (size_t i = 0; i < 2; i++){
+        // CHeck if EX is empty or MEM has no space - 2 in D1 and D2, 4 in D3 and D4
         if (pipeline.stages[EX].empty() || (pipeline.stages[MEM].size() >= 2 && (D == 1 || D == 2)) || pipeline.stages[MEM].size() >= 4) break;
         Instruction* inst = pipeline.stages[EX].front();
         
+        // prevent stalled instructions from advancing pipeline stage
         if (inst->is_stalled )
             break;
-            // incoming is a Floating Point instruciton & last instruction in EX is Load in EX2
-            // or EX queue of size 0 or 1          
-            // or First and Last instructions are Floati instructions && incoming instruciton is a non-load Instruction in D3 of D4
 
-
-
+        // track structural hazards
         bool LOAD_MEM1_exists = false;
         bool STORE_exists = false;
         bool Load_exists = false;
         int non_LOAD_count = 0;
+
+        // Loop through MEM to identify Instructions inside for structural hazards
         for (size_t j = 0; j < pipeline.stages[MEM].size(); j++){
             if (pipeline.stages[MEM][j]->type == STORE){
                 STORE_exists = true;
@@ -324,23 +285,30 @@ void Simulation::AdvancePipeline() {
                 non_LOAD_count++;
         }
 
+        // Only 1 Memory read/write port
+        if (inst->type == LOAD && LOAD_MEM1_exists) break;
         if (inst->type == STORE && STORE_exists) break;
+
+
         if (inst->type != LOAD){
+            // If a LOAD is in MEM, only 1 non-LOAD can exist in MEM
             if (Load_exists && non_LOAD_count >= 1) break;
+            // If no LOAD in MEM, allow 2 non-LOAD (except STORE) in MEM
             if (!Load_exists && non_LOAD_count >= 2) break;
         }
-        if (inst->type == LOAD && LOAD_MEM1_exists) break;
 
-
-        if (inst->type == INT || inst->type == FP || inst->type == BRANCH) {
+        // Update completed for dependencies
+        if (inst->type == INT || inst->type == FP || inst->type == BRANCH)
             inst->completed = true;
-        }
 
+
+        // Initialize MEM cycles and move instruction from EX to MEM
         inst->cycles_remaining = GetMEMCyclesCount(inst);
         inst->is_stalled = false;
         pipeline.stages[EX].erase(pipeline.stages[EX].begin());
         pipeline.stages[MEM].push_back(inst);
 
+        // Unstall fetch if a Branch instruction finishes EX stage
         if (inst->type == BRANCH)
             fetch_stalled = false;
     }
@@ -354,22 +322,22 @@ void Simulation::AdvancePipeline() {
     // Non-Load instruction can enter if EX.size is 0 or 1 OR all instructions are Floating point
 
     for (size_t i = 0; i < 2; i++){
+        // CHeck if ID is empty or EX has no space - 2 in D1 and D3, 3 in D2 and D4
         if (pipeline.stages[ID].empty() || (pipeline.stages[EX].size() >= 2 && (D == 1 || D == 3)) || pipeline.stages[EX].size() >= 3) break;
         Instruction* inst = pipeline.stages[ID].front();
         
+        // prevent stalled instructions from advancing pipeline stage
         if (inst->is_stalled )
             break;
-            // incoming is a Floating Point instruciton & last instruction in EX is Load in EX2
-            // or EX queue of size 0 or 1          
-            // or First and Last instructions are Floati instructions && incoming instruciton is a non-load Instruction in D3 of D4
 
-
-
+        // track structural hazards
         bool FP_EX1_exists = false;
         bool FP_exists = false;
         bool INT_exists = false;
         bool BRANCH_exists = false;
         int non_FP_count = 0;
+
+        // Loop through EX to identify Instructions inside for structural hazards
         for (size_t j = 0; j < pipeline.stages[EX].size(); j++){
             if (pipeline.stages[EX][j]->type == INT){
                 INT_exists = true;
@@ -388,14 +356,19 @@ void Simulation::AdvancePipeline() {
                 non_FP_count++;
         }
 
+        // Only 1 Integer/Branch/Floating Point Unit
         if (inst->type == INT && INT_exists) break;
         if (inst->type == BRANCH && BRANCH_exists) break;
         if (inst->type == FP && FP_EX1_exists) break;
+
         if (inst->type != FP){
+            // If a Floating Point is in EX, only 1 non-FP can be in EX
             if (FP_exists && non_FP_count >= 1) break;
+            // If no Floating Point in EX, allow 2 non-FP in EX (except double Int or Double Branch)
             if (!FP_exists && non_FP_count >= 2) break;
         }
 
+        // Initialize EX cycles and move instruction from ID to EX
         inst->cycles_remaining = GetEXCyclesCount(inst);
         inst->is_stalled = false;
         pipeline.stages[ID].erase(pipeline.stages[ID].begin());
@@ -416,7 +389,6 @@ void Simulation::AdvancePipeline() {
 void Simulation::RunSimulation() {
     while (retired_instructions < inst_count) {
         cycle++;
-        resources.Reset(); 
 
         WriteBack();
         Memory();
@@ -469,7 +441,7 @@ int main(int argc, char* argv[]) {
 
     // Run simulation
     printf("Running simulation with:\n");
-    printf("Trace file = %s, start_inst = %llu, inst_count = %llu, D = %d\n",
+    printf("Trace file = %s, start_inst = %lu, inst_count = %lu, D = %d\n",
            trace_file_name.c_str(), start_inst, inst_count, D);
 
     Simulation sim(trace_file_name, start_inst, inst_count, D);

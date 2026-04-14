@@ -76,21 +76,7 @@ public:
     }
 };
 
-struct Resources {
-    bool int_inUse;
-    bool fp_inUse;
-    bool branch_inUse;
-    bool mem_read_inUse;
-    bool mem_write_inUse;
 
-    void Reset() {
-        int_inUse = false;
-        fp_inUse = false;
-        branch_inUse = false;
-        mem_read_inUse = false;
-        mem_write_inUse = false;
-    }
-};
 
 class Simulation {
 public:
@@ -106,8 +92,6 @@ public:
         fetch_index = 0; 
         retired_instructions = 0;
         fetch_stalled = false;
-        
-        resources.Reset();
     };
 
     ~Simulation(){
@@ -127,7 +111,7 @@ public:
         if (total == 0) {
             printf("\nSimulation Results:\n");
             printf("No instructions retired.\n");
-            printf("Total cycles = %llu\n", cycle);
+            printf("Total cycles = %lu\n", cycle);
             return;
         }
 
@@ -152,8 +136,8 @@ public:
 
         printf("\nSimulation Results:\n");
 
-        printf("Total cycles = %llu\n", cycle);
-        printf("Total instructions retired = %llu\n", retired_instructions);
+        printf("Total cycles = %lu\n", cycle);
+        printf("Total instructions retired = %lu\n", retired_instructions);
 
         printf("Execution time = %.6f ms\n", exec_time);
 
@@ -177,8 +161,7 @@ private:
     uint64_t load_count;
     uint64_t store_count;
 
-    Pipeline pipeline;              
-    Resources resources;            
+    Pipeline pipeline;                        
     uint64_t cycle;                 
     uint64_t retired_instructions;  
 
@@ -189,9 +172,6 @@ private:
 
     uint64_t fetch_index; 
     bool fetch_stalled;                             
-    
-    bool CheckDataHazard(Instruction* inst);        
-    bool CheckStructuralHazard(Instruction* inst);  
 
     void Fetch();
     void Decode();      
